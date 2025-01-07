@@ -1,45 +1,72 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Email Link Extractor</title>
-</head>
-<body>
-  <h1>Email Link Extractor</h1>
-  <p>Enter your email credentials and search for the Rockstar Games verification link:</p>
+from flask import Flask, request, jsonify
+import imaplib
+import email
+from email.header import decode_header
+import re
 
-  <form id="emailForm">
-    <label for="email">Email:</label>
-    <input type="email" id="email" name="email" required><br>
-    <label for="password">Password:</label>
-    <input type="password" id="password" name="password" required><br>
-    <label for="subject">Subject to search:</label>
-    <input type="text" id="subject" name="subject" value="Vérifiez l'adresse e-mail de votre compte Rockstar Games"><br><br>
-    <button type="submit">Search Emails</button>
-  </form>
+app = Flask(__name__)
 
-  <div id="result"></div>
+# Configuration des paramètres IMAP
+imap_server = "imap.rambler.ru"
+imap_port = 993
 
-  <script>
-    document.getElementById("emailForm").addEventListener("submit", async function (event) {
-      event.preventDefault();
+def decode_text(encoded_text):
+    """Décode un texte encodé (par exemple, en base64 ou utf-8)."""
+    if encoded_text:
+        decoded_parts = decode_header(encoded_text)
+        text = ""
+        for part, encoding in decoded_parts:
+            if isinstance(part, bytes):
+                text += part.decode(encoding or "utf-8")
+            else:
+                text += part
+        return text
+    return ""
 
-      const email = document.getElementById("email").value;
-      const password = document.getElementById("password").value;
-      const subject = document.getElementById("subject").value;
+def extract_link(content):
+    """Extrait le lien spécifique du contenu de l'email."""
+    pattern = r"https://socialclub\.rockstargames\.com/profile/verify\?ID=[\w-]+(?:&[\w-]+=[\w%\-]+)*"
+    match = re.search(pattern, content)
+    return match.group(0) if match else None
 
-      // You'll need to use an API for backend email fetching (This can be implemented using Python on a server)
-      const resultElement = document.getElementById("result");
-      resultElement.textContent = "Searching for email...";
+@app.route('/check_email', methods=['POST'])
+def check_email():
+    data = request.json
+    email_user = data['email']
+    email_password = data['password']
+    search_subject = data['subject']
+    
+    try:
+        # Connexion au serveur IMAP
+        mail = imaplib.IMAP4_SSL(imap_server, imap_port)
+        mail.login(email_user, email_password)
+        mail.select("inbox")
 
-      // Call your API or server-side logic here.
-      // For now, we simulate with a dummy response:
-      setTimeout(() => {
-        const fakeResponse = "https://socialclub.rockstargames.com/profile/verify?ID=xyz123";
-        resultElement.textContent = "Link found: " + fakeResponse;
-      }, 2000);
-    });
-  </script>
-</body>
-</html>
+        # Recherche des emails avec le sujet donné
+        status, messages = mail.search(None, f'(SUBJECT "{search_subject}")'.encode("utf-8"))
+
+        if messages[0]:
+            email_ids = messages[0].split()
+            for email_id in email_ids:
+                status, data = mail.fetch(email_id, "(RFC822)")
+                raw_email = data[0][1]
+                parsed_email = email.message_from_bytes(raw_email)
+
+                for part in parsed_email.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get("Content-Disposition"))
+                    if content_type in ["text/plain", "text/html"] and "attachment" not in content_disposition:
+                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                        link = extract_link(body)
+                        if link:
+                            return jsonify({"link": link})
+            return jsonify({"error": "No matching email found"})
+        else:
+            return jsonify({"error": "No email found with the subject"})
+        
+        mail.logout()
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+if __name__ == '__main__':
+    app.run(debug=True)
